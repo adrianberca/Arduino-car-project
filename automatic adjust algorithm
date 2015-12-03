@@ -1,0 +1,583 @@
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <util/delay.h>
+
+#define sbi(sfr, bit) (_SFR_BYTE(sfr) |=  _BV(bit))//turn led ON
+#define cbi(sfr, bit) (_SFR_BYTE(sfr) &= ~_BV(bit))//turn led OFF
+
+
+  
+//===============  DECLARATIONS FRONT DOWN SENSOR  ===================================================================
+const int LDR0 = PORTC0;     //analog pin to which LDR is connected, here we set it to 0 so it means A0
+int LDR_FRONT_DOWN_Value = 0;      //that’s a variable to store LDR values
+//==============================================================================================================
+
+//===============  DECLARATIONS FRONT UP SENSOR  =====================================================================
+const int LDR1 = PORTC1;     //analog pin to which LDR is connected, here we set it to 1 so it means A1
+int LDR_FRONT_UP_Value = 0;      //that’s a variable to store LDR values
+//==============================================================================================================
+
+//===============  DECLARATIONS LEFT DOWN SENSOR  =====================================================================
+const int LDR2 = PORTC2;     //analog pin to which LDR is connected, here we set it to 2 so it means A2
+int LDR_LEFT_DOWN_Value = 0;      //that’s a variable to store LDR values
+//==============================================================================================================
+
+//===============  DECLARATIONS LEFT UP SENSOR  =====================================================================
+const int LDR3 = PORTC3;     //analog pin to which LDR is connected, here we set it to 3 so it means A3
+int LDR_LEFT_UP_Value = 0;      //that’s a variable to store LDR values
+//==============================================================================================================
+
+//===============  DECLARATIONS RIGHT DOWN SENSOR  =====================================================================
+const int LDR4 = PORTC4;     //analog pin to which LDR is connected, here we set it to 4 so it means A4
+int LDR_RIGHT_DOWN_Value = 0;      //that’s a variable to store LDR values
+//==============================================================================================================
+
+//===============  DECLARATIONS RIGHT UP SENSOR  =====================================================================
+const int LDR5 = PORTC5;     //analog pin to which LDR is connected, here we set it to 5 so it means A5
+int LDR_RIGHT_UP_Value = 0;      //that’s a variable to store LDR values
+//==============================================================================================================
+
+const int UNCONNECTED_PIN=0;   //analog pin used for the randomizing function
+
+const int delay_viraj = 220;//constanta pe care o folosesc sa si delay la viraje
+const int delay_adjust = 7;
+
+const int START_S=0;           //sensor start value
+const int COMMANDS_SIZE=128;   //the number of command we keep history of
+const int TIME_STEP=10;        //the size of a time step in millis
+
+
+int sensor_max_value;
+
+
+//===============  DECLARATIONS OF SENSOR THRESHOLDS  ==========================================================
+const int THRESHOLD_LOW_FRONT_UP=550;
+const int THRESHOLD_HIGH_FRONT_UP=650;
+
+const int THRESHOLD_LOW_FRONT_DOWN=550;
+const int THRESHOLD_HIGH_FRONT_DOWN=650;
+
+const int THRESHOLD_LOW_LEFT_UP=550;
+const int THRESHOLD_HIGH_LEFT_UP=650;
+
+const int THRESHOLD_LOW_LEFT_DOWN=550;
+const int THRESHOLD_HIGH_LEFT_DOWN=650;
+
+const int THRESHOLD_LOW_RIGHT_UP=550;
+const int THRESHOLD_HIGH_RIGHT_UP=650;
+
+const int THRESHOLD_LOW_RIGHT_DOWN=550;
+const int THRESHOLD_HIGH_RIGHT_DOWN=650;
+
+//===============  DECLARATIONS OF ADJUSTING SENSOR THRESHOLDS  ================================================
+
+const int THRESHOLD_LOW_RIGHT_UP_ADJUST=550;
+const int THRESHOLD_HIGH_RIGHT_UP_ADJUST=650;
+
+const int THRESHOLD_LOW_RIGHT_DOWN_ADJUST=550;
+const int THRESHOLD_HIGH_RIGHT_DOWN_ADJUST=650;
+
+//==============================================================================================================
+
+
+//===============  SENSOR FLAG (true if under light)  ==========================================================
+
+boolean flag_front_up;
+boolean flag_front_down;
+boolean flag_left_up;
+boolean flag_left_down;
+boolean flag_right_up;
+boolean flag_right_down;
+boolean flag_right_up_adjust;
+boolean flag_right_down_adjust;
+
+boolean flag_front;       // combination of flag_front_up and flag_front_down
+boolean flag_left;        // combination of flag_left_up and flag_left_down
+boolean flag_right;       // combination of flag_right_up and flag_right_down
+boolean flag_right_adjust;       // combination of flag_right_up_adjust and flag_right_down_adjust
+
+//==============================================================================================================
+
+
+int command;
+int commandIndex = -1;
+int commands[COMMANDS_SIZE];
+
+boolean backtrack = false;
+
+
+
+void addCommand(int command){
+  commandIndex++;
+  commands[commandIndex % COMMANDS_SIZE]=command;
+}
+
+int getPrevCommand(int deltaIndex){
+  //test whether the desired command's index is negative
+  if(commandIndex - deltaIndex < 0)
+    return -1;
+
+  //test whether the desired command's index is still stored
+  if(deltaIndex >= COMMANDS_SIZE)
+    return -1;
+
+  return commands[(commandIndex-deltaIndex)%COMMANDS_SIZE];
+}
+
+void printSensorValuesAndFlags(){
+  
+  Serial.println("LDR_FRONT_DOWN_Value:"+String(LDR_FRONT_DOWN_Value)+",flag:"+String(flag_front_down));
+  Serial.println("LDR_FRONT_UP_Value:  "+String(LDR_FRONT_UP_Value)+",flag:"+String(flag_front_up));
+
+  Serial.println("LDR_LEFT_DOWN_Value: "+String(LDR_LEFT_DOWN_Value)+",flag:"+String(flag_left_down));
+  Serial.println("LDR_LEFT_UP_Value:   "+String(LDR_LEFT_UP_Value)+",flag:"+String(flag_left_up));
+
+  Serial.println("LDR_RIGHT_DOWN_Value:"+String(LDR_RIGHT_DOWN_Value)+",flag:"+String(flag_right_down));
+  Serial.println("LDR_RIGHT_UP_Value:  "+String(LDR_RIGHT_UP_Value)+",flag:"+String(flag_right_up));
+
+  
+  Serial.println();
+  
+}
+
+void printPrevCommand(int index){
+  String dir="no dir";
+  switch(getPrevCommand(index)){
+    case 0:dir="up";break;
+    case 1:dir="right";break;
+    case 2:dir="left";break;
+    case 3:dir="down";break;
+  }
+  Serial.println("Direction: "+dir);
+}
+
+void printCommand(){
+  printPrevCommand(0);
+}
+
+void setup(){
+  Serial.begin(115200);                 // Note higher baud rate
+  Serial.println("Starting...");
+  
+
+//===============OUTPUT PINS========================================================================================================================================================  
+  DDRB = (1 << PORTB0) |(1 << PORTB1) | (1 << PORTB2) | (1 << PORTB3) | (1 << PORTB4)  |(1 << PORTB5)  ;//PORTB 0,1,2,3 for the engines PORTB4 pt samnalizare la stanga, PORTB5 pt semnalizare la dreapta
+//==================================================================================================================================================================================
+
+//============================= these are for the PWM SETUP ========================================================================================================================
+
+  DDRD = (1 << PORTD5) | (1 << PORTD6) | (1 << PORTD7);//PWMA = PORTD5     PWMB = PORTD6   STDBY = PORTD7
+  
+  TCCR0A = (1 << COM0A1) | (1 << WGM00)|(1 << WGM01)|(1 << COM0B1);//set CTC(clear time and commpare) bit, for reset the count at a moment and start again from the beginning 
+  
+  TCCR0B = (1 <<WGM02);//|(1 << CS02) | (1 << CS00);//FAST PWM
+  
+  TCCR0B = (1 << CS02) | (1 << CS00);//start the TIMERS, start at 1024 prescalar
+
+  // Bit 7 – ICNC1 - Input Capture Noise Canceler – Acest bit setat va activa opțiunea de noise cancel  a modului de captură.
+  // Norma bitul ICNC1 trebuia setat pentru TCCR1B
+  // Dacă modul de captură foloseste opțiunea de noise cancel, detectarea evenimentului va dura de 4 ori mai mult decât in mod normal.
+  // Acestă obțiune este folosită pentru o mai bună filtrare a semnalului de intrare, algoritmul de filtrare constând în generarea evenimentului
+  // de captură doar dacă ultimele 4 monitorizări au valori egale.
+  
+  //================================== AICI SETEZ VITEZA MOTOARELOR ======================================================
+  //OCR0A = 120;//comparison for A - 8 bit TIMER (50% on and 50% off)    If I put OCR1A = 100, the engines will be 100 %
+  //OCR0B = 120;
+ 
+  
+  //TIMSK  = the register that control the interrupts, here we can set--- whe this happens, I want this to  happen, this interrupt to occur
+  //BIT1 - OCIE0A this is the bit that says..I want an interrupt to setup, such that when my comparison value for A matches my timmer value , I want to setup
+   
+  //TOIEO is te interrupt used to increase permanently the speed of ENGINES 
+  //TIMSK0 = (1 << TOIE0);//TOIE is that kind of interrupts that is used when it's overflow the comparison
+  //TIMSK0 = (1 << OCIE0A);//COMPARE
+  
+  //TCNT0 hold the TICS from TIMMER
+
+  randomSeed(analogRead(UNCONNECTED_PIN));
+//===================================================================================================================================================================================  
+}
+
+void loop(){
+  /*
+  Serial.println("Cnt1: " + String(cnt1 - oldcnt1));
+  Serial.println("Cnt2: " + String(cnt2 - oldcnt2));
+  */
+  start_ALL_SENSORS();
+  //_delay_ms(500);
+ printSensorValuesAndFlags();
+ avoidObstacle();
+
+    
+}
+
+void adjust_position() {
+  /*
+  if(   )
+  {
+          //If the right_down sensor detects light
+          
+            if(LDR_RIGHT_DOWN_Value > THRESHOLD_HIGH_RIGHT_DOWN_ADJUST){// && flag_right_down_adjust == false){
+              //flag_right_down_adjust = true;
+              //if the left_down sensor is too close of the light, turn left for 10 ms
+              
+              //vireaza stanga pentru 10ms
+            }
+            
+            if(LDR_RIGHT_DOWN_Value < THRESHOLD_LOW_RIGHT_DOWN_ADJUST){// && flag_right_down_adjust == true){
+              //flag_right_down_adjust = false;
+              //if the right_up sensor is too far of the light, turn right for 10 ms
+          
+              //vireaza dreapta pentru 10ms
+            }
+  }
+
+
+  else if(    )
+  {
+     //If the left_up sensor detects light
+     
+      if(LDR_RIGHT_UP_Value > THRESHOLD_HIGH_RIGHT_UP_ADJUST){// && flag_right_up_adjust == false){
+        //flag_right_up_adjust = true;
+    
+        //vireaza stanga pentru 10ms
+      }
+      if(LDR_RIGHT_UP_Value < THRESHOLD_LOW_RIGHT_UP_ADJUST){// && flag_right_up_adjust == true){
+        //flag_right_up_adjust = false;
+    
+         //vireaza dreapta pentru 10ms
+      }
+  }
+  */
+  sensor_max_value = max(LDR_RIGHT_UP_Value, LDR_RIGHT_DOWN_Value);//max between right_down value and right_up value
+  
+  if (sensor_max_value < THRESHOLD_LOW_RIGHT_UP_ADJUST) {
+    // zona de dark
+    // vireaza dreapta pentru 10ms 
+    goRIGHT_without_delay();
+    //_delay_ms(10);
+  } //else if (THRESHOLD_LOW_RIGHT_UP_ADJUST <= sensor_max_value && sensor_max_value <= THRESHOLD_HIGH_RIGHT_UP_ADJUST) {
+    // zona de semi-light
+    // merge inainte
+    //goFRONT();
+  //}
+  else if (sensor_max_value >= THRESHOLD_HIGH_RIGHT_UP_ADJUST) {
+    // zona de light
+    // vireaza stanga pt 10ms
+    goLEFT_without_delay();
+    //_delay_ms(10);
+  }
+}
+
+void avoidObstacle()
+{
+  
+      flag_front = flag_front_down | flag_front_up;
+      flag_left = flag_left_down | flag_left_up;
+      flag_right = flag_right_down | flag_right_up;
+      flag_right_adjust = flag_right_down_adjust | flag_right_up_adjust;
+      
+      command=0;
+      
+      //no frontal obstacle and no back move was just made
+      //in this case go front
+      if(flag_front == false){
+        //if the front sensor does not detect light
+        //GO FRONT
+         command = 0;
+         goFRONT();
+        _delay_ms(2);
+        adjust_position();
+      }
+      else
+      {
+        
+        if(flag_right == false && flag_left == false){
+          //if the front sensor detects light and  both the right sensor and the left sensor do not detect light
+          //GO LEFT OR RIGHT RANDOM
+          command = random(1, 3);
+        }
+        
+        //no right obstacle
+        else if(flag_right == false && flag_left == true){
+          //if the front sensor detects light and the left sensor detects light as well, while the right sensor doesn't detect light
+          //GO LEFT
+          command = 1;
+        }
+        
+        //no left obstacle
+        else if(flag_left == false && flag_right == true){
+          //if the front sensor detects light and the right sensor detects light as well, while the left sensor doesn't detect light
+          //GO RIGHT
+          command = 2;
+        }
+        
+        // both left and right are obstacles so go back
+        else if(flag_left == true && flag_right == true) {
+          //if the front sensor, the right sensor and the left sensor detect light
+          //GO LEFT OR RIGHT
+          command = random(1, 3);
+        }
+      }
+      
+      //printCommand();
+
+      // execute the asigned command
+      switch (command)
+      {
+        case 0: goFRONT(); break;
+        case 1: goRIGHT(); break;
+        case 2: goLEFT();  break;
+      }
+}
+
+void start_ALL_SENSORS() {
+  start_FRONT_DOWN_SENSOR();
+  start_FRONT_UP_SENSOR();
+  
+  start_LEFT_DOWN_SENSOR();
+  start_LEFT_UP_SENSOR();
+  
+  start_RIGHT_DOWN_SENSOR();
+  start_RIGHT_UP_SENSOR();
+}
+
+void start_FRONT_DOWN_SENSOR()
+{
+//================  FRONT SENSOR START  ========================================================================
+  LDR_FRONT_DOWN_Value = analogRead(LDR0);      //reads the ldr’s value through LDR 
+
+  if(LDR_FRONT_DOWN_Value > THRESHOLD_HIGH_FRONT_DOWN && flag_front_down == false){
+    flag_front_down = true;
+  }
+  if(LDR_FRONT_DOWN_Value < THRESHOLD_LOW_FRONT_DOWN && flag_front_down == true){
+    flag_front_down = false;
+  }
+//=============================================================================================================
+}
+
+void start_FRONT_UP_SENSOR()
+{
+//================  FRONT SENSOR START  ========================================================================
+  LDR_FRONT_UP_Value = analogRead(LDR1);      //reads the ldr’s value through LDR 
+  
+  if(LDR_FRONT_UP_Value > THRESHOLD_HIGH_FRONT_UP && flag_front_up == false){
+    flag_front_up = true;
+  }
+  if(LDR_FRONT_UP_Value < THRESHOLD_LOW_FRONT_UP && flag_front_up == true){
+    flag_front_up = false;
+  }
+//=============================================================================================================
+}
+
+void start_LEFT_DOWN_SENSOR()
+{
+//================  LEFT SENSOR START  ==========================================================================
+  LDR_LEFT_DOWN_Value = analogRead(LDR2);      //reads the ldr’s value through LDR 
+  
+  if(LDR_LEFT_DOWN_Value > THRESHOLD_HIGH_LEFT_DOWN && flag_left_down == false){
+    flag_left_down = true;
+  }
+  if(LDR_LEFT_DOWN_Value < THRESHOLD_LOW_LEFT_DOWN && flag_left_down == true){
+    flag_left_down = false;
+  }
+//=============================================================================================================
+}
+
+void start_LEFT_UP_SENSOR()
+{
+//================  LEFT SENSOR START  ==========================================================================
+  LDR_LEFT_UP_Value = analogRead(LDR3);      //reads the ldr’s value through LDR 
+  
+  if(LDR_LEFT_UP_Value > THRESHOLD_HIGH_LEFT_UP && flag_left_up == false){
+    flag_left_up = true;
+  }
+  if(LDR_LEFT_UP_Value < THRESHOLD_LOW_LEFT_UP && flag_left_up == true){
+    flag_left_up = false;
+  }
+//=============================================================================================================
+}
+
+void start_RIGHT_DOWN_SENSOR()
+{
+//================  RIGHT SENSOR START  ========================================================================
+  LDR_RIGHT_DOWN_Value = analogRead(LDR4);      //reads the ldr’s value through LDR 
+  
+  if(LDR_RIGHT_DOWN_Value > THRESHOLD_HIGH_RIGHT_DOWN && flag_right_down == false){
+    flag_right_down = true;
+  }
+  if(LDR_RIGHT_DOWN_Value < THRESHOLD_LOW_RIGHT_DOWN && flag_right_down == true){
+    flag_right_down = false;
+  }
+//=============================================================================================================
+}
+
+void start_RIGHT_UP_SENSOR()
+{
+//================  RIGHT SENSOR START  ========================================================================
+  LDR_RIGHT_UP_Value = analogRead(LDR5);      //reads the ldr’s value through LDR 
+  
+  if(LDR_RIGHT_UP_Value > THRESHOLD_HIGH_RIGHT_UP && flag_right_up == false){
+    flag_right_up = true;
+  }
+  if(LDR_RIGHT_UP_Value < THRESHOLD_LOW_RIGHT_UP && flag_right_up == true){
+    flag_right_up = false;
+  }
+//=============================================================================================================
+}
+
+
+void goFRONT()
+{
+   //merge inainte
+   OCR0A = 100;//OCR0A este PWM-ul pentru rotile din partea dreapta
+   OCR0B = 100;//OCR0B este PWM-ul pentru rotile din partea stanga
+   
+   sbi(PORTB,PORTB0);//Rotile din stanga
+   cbi(PORTB,PORTB1);//Rotile din stanga
+                  
+   sbi(PORTD,PORTD7); //STDBY va fi tot timpul 1
+   
+   sbi(PORTB,PORTB2);//SET PWMA ON    pt rotile din dreapta
+   cbi(PORTB,PORTB3);//SET PWMA ON    pt rotile din dreapta
+       
+}
+
+void goBACK()
+{
+   //merge in spate
+   OCR0A = 235;//OCR0A este PWM-ul pentru rotile din partea dreapta
+   OCR0B = 235;//OCR0B este PWM-ul pentru rotile din partea stanga
+   
+   cbi(PORTB,PORTB0);//Rotile din stanga
+   sbi(PORTB,PORTB1);//Rotile din stanga
+                
+   sbi(PORTD,PORTD7); //STDBY va fi tot timpul 1
+   
+   cbi(PORTB,PORTB2);//SET PWMA ON    pt rotile din dreapta
+   sbi(PORTB,PORTB3);//SET PWMA ON    pt rotile din dreapta     
+}
+
+void goLEFT()
+{
+  //=========SEMNALIZARE INAINTEA VIRARII LA STANGA==================================
+   stopCAR();
+   for(int i = 0 ; i < 5 ; i++)
+   {
+   PORTB ^= (1 << PORTB5);
+   _delay_ms(delay_viraj);// delay 500 ms cand a iesit din for
+   }
+   //=====================================================================================
+  
+   //VIREAZA STANGA
+   OCR0A = 228;
+   OCR0B = 228;
+   
+   cbi(PORTB,PORTB0);//Rotile din stanga
+   sbi(PORTB,PORTB1);//Rotile din stanga
+                  
+   sbi(PORTD,PORTD7); //STDBY va fi tot timpul 1
+   //sbi(PORTB,PORTB5);
+  
+   
+   sbi(PORTB,PORTB2);//SET PWMA ON    pt rotile din dreapta
+   cbi(PORTB,PORTB3);//SET PWMA ON    pt rotile din dreapta
+
+   //=========SEMNALIZARE PE PARCURSUL VIRARII LA STANGA==================================
+   for(int i = 0 ; i < 5 ; i++)
+   {
+   PORTB ^= (1 << PORTB5);
+   _delay_ms(delay_viraj);// delay 500 ms cand a iesit din for
+   }
+   //=====================================================================================
+   PORTB &= ~(1 << PORTB5);
+}
+void goRIGHT()
+{
+  stopCAR();
+  //=========SEMNALIZARE PE PARCURSUL VIRARII LA STANGA==================================
+   for(int i = 0 ; i < 5 ; i++)
+   {
+   PORTB ^= (1 << PORTB4);
+   _delay_ms(delay_viraj);// delay 500 ms cand a iesit din for
+   }
+   //=====================================================================================
+   //VIREAZA DREAPTA
+   OCR0A = 228;
+   OCR0B = 228;
+   
+   sbi(PORTB,PORTB0);//Rotile din stanga
+   cbi(PORTB,PORTB1);//Rotile din stanga
+                
+   sbi(PORTD,PORTD7); //STDBY va fi tot timpul 1
+   
+   cbi(PORTB,PORTB2);//SET PWMA ON    pt rotile din dreapta
+   sbi(PORTB,PORTB3);//SET PWMA ON    pt rotile din dreapta
+   
+
+   //=========SEMNALIZARE PE PARCURSUL VIRARII LA STANGA==================================
+   for(int i = 0 ; i < 5 ; i++)
+   {
+   PORTB ^= (1 << PORTB4);
+   _delay_ms(delay_viraj);// delay 500 ms cand a iesit din for
+   }
+   //=====================================================================================
+   PORTB &= ~(1 << PORTB4);
+}
+
+void goRIGHT_without_delay()
+{
+  //VIREAZA DREAPTA
+  /*
+    if(sensor_max_value < 300)
+  {
+   OCR0A = 220;//PWM ROTI DREAPTA
+   OCR0B = 100;//PWM ROTI STANGA
+  }
+  else{
+   OCR0A = 180;//PWM ROTI DREAPTA
+   OCR0B = 150;//PWM ROTI STANGA
+  }
+  */
+   OCR0A = 210;//PWM ROTI DREAPTA
+   OCR0B = 250;//PWM ROTI STANGA  
+   sbi(PORTB,PORTB0);//Rotile din stanga
+   cbi(PORTB,PORTB1);//Rotile din stanga
+                  
+   sbi(PORTD,PORTD7); //STDBY va fi tot timpul 1
+   //sbi(PORTB,PORTB5);
+  
+   
+   cbi(PORTB,PORTB2);//SET PWMA ON    pt rotile din dreapta
+   cbi(PORTB,PORTB3);//SET PWMA ON    pt rotile din dreapta
+   _delay_ms(delay_adjust);
+}
+
+void goLEFT_without_delay()
+{
+  //VIREAZA STANGA
+   OCR0A = 250;//PWM ROTI DREAPTA
+   OCR0B = 210;//PWM ROTI STANGA
+   
+   cbi(PORTB,PORTB0);//Rotile din stanga
+   cbi(PORTB,PORTB1);//Rotile din stanga
+                  
+   sbi(PORTD,PORTD7); //STDBY va fi tot timpul 1
+   //sbi(PORTB,PORTB5);
+  
+   
+   sbi(PORTB,PORTB2);//SET PWMA ON    pt rotile din dreapta
+   cbi(PORTB,PORTB3);//SET PWMA ON    pt rotile din dreapta
+   _delay_ms(delay_adjust);
+}
+
+
+void stopCAR()
+{
+  cbi(PORTB,PORTB0);
+  cbi(PORTB,PORTB1);
+  cbi(PORTB,PORTB2);  
+  cbi(PORTB,PORTB3);
+}
+
+
